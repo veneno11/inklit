@@ -179,7 +179,7 @@ self.addEventListener('notificationclose', event => {
   if (timerWake) timerWake();
 });
 
-/* Friend cheers, timer alerts and the live timer all open the app here. */
+/* Friend cheers, timer alerts, daily reminders and the live timer all open the app here. */
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   const data = event.notification.data || {};
@@ -198,14 +198,18 @@ self.addEventListener('notificationclick', event => {
     if (self.clients.openWindow) {
       await self.clients.openWindow(new URL(openTimer ? './?action=timer' : `./#${tab}`, self.registration.scope).href);
     }
- // ---- Daily reminders (sent by the hourly job on GitHub) ----
+  })());
+});
+
+/* Daily reminders, sent by the hourly job on GitHub as data-only pushes.
+   A push must always show something, or the browser shows its own
+   "This site has been updated in the background" message instead. */
 self.addEventListener('push', event => {
   let p = {};
   try { p = event.data ? event.data.json() : {}; } catch (_) {}
-  const d = p.data || p;
-  if (!d || !d.title) return;
-  event.waitUntil(self.registration.showNotification(d.title, {
-    body: d.body || '',
+  const d = p.data || p || {};
+  event.waitUntil(self.registration.showNotification(d.title || 'InkLit', {
+    body: d.body || 'Time to read and learn.',
     icon: 'icon-192.png',
     badge: 'icon-192.png',
     tag: d.tag || 'inklit-reminder',
@@ -213,3 +217,4 @@ self.addEventListener('push', event => {
     data: { tab: d.tab || 'home', action: d.action || '' }
   }));
 });
+
