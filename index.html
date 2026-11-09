@@ -5998,28 +5998,35 @@ onAction({
   'kbd-help': () => openShortcuts()
 });
 
-/* =====================================================================
-   39. V2.3 — DAILY REMINDERS
+   /* =====================================================================
+   39. V3.0 — DAILY REMINDERS (Duolingo-style)
    Push notifications that arrive even when InkLit is closed. This device saves a push
-   token under users/{uid}/devices; an hourly job on GitHub checks your streak and due
-   words and sends a nudge at the time you pick, plus a 9 PM last call if your streak
-   is at risk. The same idea Duolingo uses, run from your own GitHub.
+   token under users/{uid}/devices, and an hourly job on GitHub (inklit-reminders.js)
+   decides what to send: a daily nudge timed about 23.5 hours after you first read or
+   learned the day before (or at a fixed hour you pick), a streak saver around 9 PM if
+   your streak is about to end, and a short comeback series if you miss days.
+   To time tomorrow's nudge, the app notes when you first read and first learn each day.
    ===================================================================== */
 const VAPID_KEY = 'BN7hjWaVx-fjU2X82vCPfMbrhLvNKl5W9GyF98t_K_quQ2U1cKNWFlzZvC4-R8IkxMI6vkPEOzdNH5Mfqn5YfM0'; // inklit-4b02e: Project settings → Cloud Messaging → Web Push certificates → Key pair
 const REMINDER_HOURS = [7, 8, 12, 15, 16, 17, 18, 19, 20, 21];
+const ACTIVE_KEY = 'inklit:v2:activeDay';
 const RM = { status: 'checking', busy: false };
 if (!Number.isInteger(prefs.reminderHour)) prefs.reminderHour = 19;
+if (typeof prefs.reminderSmart !== 'boolean') prefs.reminderSmart = true; // timing from your habits, Duolingo's default
 
 const hourLabel = h => new Date(2000, 0, 1, h).toLocaleTimeString('en-US', { hour: 'numeric' });
+const rmWhen = () => prefs.reminderSmart ? 'around when you usually read' : `at ${hourLabel(prefs.reminderHour)}`;
 const RM_TEXT = {
   checking: 'Checking this browser…',
   unsupported: "This browser can't get push notifications. On iPhone, add InkLit to your Home Screen first.",
   'needs-key': 'Add the Web Push key (VAPID_KEY) in index.html to turn this on.',
   'signed-out': 'Sign in with Google first, so reminders can reach you on this device.',
   blocked: 'Notifications are blocked for InkLit. Allow them in your browser or phone settings.',
-  off: 'Get a nudge to read and review your words, even when InkLit is closed.',
-  on: "On. You'll get a nudge if you haven't read by this time, plus a 9 PM last call if your streak is at risk."
+  off: 'Get a nudge to read and review your words, even when InkLit is closed.'
 };
+const rmText = () => RM.status === 'on'
+  ? `On. If you haven't read yet, Inky nudges you ${rmWhen()}, plus a last call around 9 PM if your streak is about to end.`
+  : (RM_TEXT[RM.status] || '');
 
 async function messagingApi() {
   if (!(await loadFirebase())) throw new Error('Cloud sync is unavailable');
@@ -6045,12 +6052,15 @@ async function refreshReminderStatus() {
 function remindersBlockHTML() {
   const on = RM.status === 'on';
   const canToggle = ['on', 'off'].includes(RM.status);
+  const pick = prefs.reminderSmart ? 'smart' : String(prefs.reminderHour);
   return `<div class="set-block" id="rmBlock">
     <div class="set-title"><span>${icon('bell')} Daily reminders</span><span class="tag ${on ? 'green' : ''}">${on ? 'On' : 'Off'}</span></div>
-    <p class="small muted mt-sm">${esc(RM_TEXT[RM.status] || '')}</p>
+    <p class="small muted mt-sm">${esc(rmText())}</p>
     <div class="key-row${canToggle ? '' : ' hidden'}">
-      <select class="field" data-change="rm-hour" aria-label="Reminder time" style="font-family:inherit;font-size:15px">${REMINDER_HOURS.map(h =>
-        `<option value="${h}"${h === prefs.reminderHour ? ' selected' : ''}>${hourLabel(h)}</option>`).join('')}</select>
+      <select class="field" data-change="rm-hour" aria-label="Reminder time" style="font-family:inherit;font-size:15px">
+        <option value="smart"${pick === 'smart' ? ' selected' : ''}>Smart: when I usually read</option>
+        ${REMINDER_HOURS.map(h => `<option value="${h}"${pick === String(h) ? ' selected' : ''}>Every day at ${hourLabel(h)}</option>`).join('')}
+      </select>
       <button type="button" class="btn ${on ? 'btn-ghost' : 'btn-primary'}" data-act="rm-toggle"${RM.busy ? ' disabled' : ''}>${on ? 'Turn off' : `${icon('bell')} Turn on`}</button>
     </div>
     ${RM.status === 'signed-out' && !UI.cloudFailed ? `<button type="button" class="btn btn-primary btn-sm mt-sm" data-act="sign-in">${icon('cloud')} Sign in</button>` : ''}
@@ -6078,7 +6088,7 @@ async function saveReminderDevice() {
   const id = await deviceIdFor(token);
   const old = prefs.pushDeviceId;
   await FB.F.setDoc(cloudRef(['devices', id]), {
-    token, enabled: true, hour: prefs.reminderHour,
+    token, enabled: true, hour: prefs.reminderHour, smart: prefs.reminderSmart,
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
     platform: navigator.userAgent.slice(0, 120), updatedAt: Date.now()
   }, { merge: true });
@@ -6107,7 +6117,7 @@ async function enableReminders() {
     prefs.notify = true;
     savePrefs();
     RM.status = 'on';
-    toast(`Reminders are on. If you haven't read or done your lesson by ${hourLabel(prefs.reminderHour)}, Inky will nudge you.`, { type: 'success', ic: 'bell' });
+    toast(`Reminders are on. If you haven't read yet, Inky will nudge you ${rmWhen()}.`, { type: 'success', ic: 'bell' });
   } catch (e) {
     console.warn('[InkLit] reminders', e);
     RM.status = 'off';
@@ -6143,15 +6153,42 @@ async function disableReminders() {
   }
 }
 
+// When you first read and first learn each day (once per device), so the job can time
+// tomorrow's nudge and tell which messages got you reading. Timer sessions count from
+// when the session started.
+function markActive(kind, at = Date.now()) {
+  if (!cloudOn()) return;
+  const today = dayKey(), key = `${ACTIVE_KEY}:${kind}`;
+  let last = '';
+  try { last = localStorage.getItem(key) || ''; } catch {}
+  if (last === today) return;
+  try { localStorage.setItem(key, today); } catch {}
+  cloudWrite(['meta', 'progress'], { activeAt: { [today]: FB.F.arrayUnion(Math.round(at)) } });
+}
+const logReadingBase = logReading;
+logReading = function (sec = 0, opts) {
+  const out = logReadingBase(sec, opts);
+  markActive('read', Date.now() - Math.max(0, Number(sec) || 0) * 1000);
+  return out;
+};
+const finishLessonBase = finishLesson;
+finishLesson = function () {
+  const out = finishLessonBase();
+  markActive('learn');
+  return out;
+};
+
 onAction({ 'rm-toggle': () => (RM.status === 'on' ? disableReminders() : enableReminders()) });
 onChange({
   'rm-hour': el => {
-    prefs.reminderHour = clamp(parseInt(el.value, 10) || 19, 0, 23);
+    if (el.value === 'smart') prefs.reminderSmart = true;
+    else { prefs.reminderSmart = false; prefs.reminderHour = clamp(parseInt(el.value, 10) || 19, 0, 23); }
     savePrefs();
     if (prefs.reminders && prefs.pushDeviceId && cloudOn()) {
-      cloudWrite(['devices', prefs.pushDeviceId], { hour: prefs.reminderHour, updatedAt: Date.now() });
+      cloudWrite(['devices', prefs.pushDeviceId], { hour: prefs.reminderHour, smart: prefs.reminderSmart, updatedAt: Date.now() });
     }
-    toast(`Reminder time set to ${hourLabel(prefs.reminderHour)}.`, { type: 'success', ic: 'clock' });
+    paintReminders();
+    toast(prefs.reminderSmart ? 'Smart timing is on. Inky will learn when you usually read.' : `Reminders set for ${hourLabel(prefs.reminderHour)}.`, { type: 'success', ic: 'clock' });
   }
 });
 
@@ -6167,6 +6204,7 @@ const rmRefreshTimer = setInterval(() => {
   rmTries++;
   saveReminderDevice().catch(e => { rmRefreshed = false; console.info('[InkLit] reminder refresh', e); });
 }, 5000);
+
 
 /* =====================================================================
    40. V2.3 — LIVE LOCK-SCREEN TIMER
